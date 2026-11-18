@@ -1,0 +1,51 @@
+package matmul;
+
+import core$;
+
+/// An `n` by `n` matrix of zeros, as a list of rows.
+List<List<Float>> matAlloc(n Int) => List(n, List(n, Float(0.0)));
+
+List<List<Float>> matGen(n Int) {
+	a List<List<Float>> = matAlloc(n);
+	tmp Float = Float(1.0) / Float(n) / Float(n);
+	i Int = Int(1);
+	i!to(n) {
+		j Int = Int(1);
+		j!to(n) {
+			a[i][j] = tmp * Float(i - j) * Float(i + j - 2);
+		}
+	}
+	return a;
+}
+
+List<List<Float>> matMul(n Int, a List<List<Float>>, b List<List<Float>>) {
+	c List<List<Float>> = matAlloc(n);
+	i Int = Int(1);
+	i!to(n) {
+		k Int = Int(1);
+		k!to(n) {
+			aik Float = a[i][k];
+			j Int = Int(1);
+			j!to(n) {
+				c[i][j] = c[i][j] + aik * b[k][j];
+			}
+		}
+	}
+	return c;
+}
+
+Unit main() {
+	console Console(@program$console);
+	runtime Runtime(@program$runtime);
+	args List<String> = runtime:arguments();
+	n Int = Int(1500);
+	if(args:size() > 0) {
+		n = args[Int(1)]:parseInt() ?? Int(1500);
+	}
+	a List<List<Float>> = matGen(n);
+	b List<List<Float>> = matGen(n);
+	c List<List<Float>> = matMul(n, a, b);
+	mid Int = n / 2 + 1;
+	console!print(String(c[mid][mid]));
+	return Unit();
+}

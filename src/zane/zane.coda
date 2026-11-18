@@ -1,0 +1,7 @@
+zane-version v0.40
+version-pattern v*.+.++
+
+deps [
+    key version from
+    std v0.14 source
+]

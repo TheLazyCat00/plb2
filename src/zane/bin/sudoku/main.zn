@@ -1,0 +1,307 @@
+package sudoku;
+
+import core$;
+import math$;
+
+// A port of plb2's sudoku.c, the kudoku algorithm. Read its comments for how
+// a Sudoku becomes an exact cover over 324 constraints and 729 choices.
+//
+// Lists are counted from 1, so a C array element `x[i]` is `x[i + 1]` here,
+// and the two dimensional arrays of the sparse matrix are flattened:
+// `r[c][i]` is `auxR[c * 9 + i + 1]` and `c[r][j]` is `auxC[r * 4 + j + 1]`.
+// All other numbers keep their C values, counted from 0.
+type Solver = #struct {
+	auxR List<Int>; // the 9 choices of each constraint
+	auxC List<Int>; // the 4 constraints of each choice
+	sr List<Int>; // sr[r]: how many times choice r is forbidden by others
+	sc List<Int>; // sc[c]: bits 1-7, the choices c allows; bit 8, c is used
+	cr List<Int>; // cr[i]: the choice made at step i
+	cc List<Int>; // cc[i]: the constraint chosen at step i
+	out List<U8>;
+	hints Int;
+	i Int;
+	dir Int; // 1: forward; -1: backtrack
+	cand Int;
+	solutions List<String>;
+}
+
+/// The sparse representation of the binary matrix, as sd_genmat makes it.
+Solver() {
+	auxR List<Int> = List(Int(2916), Int(0));
+	auxC List<Int> = List(Int(2916), Int(0));
+	r Int = Int(0);
+	i Int = Int(0);
+	i!to(8) {
+		j Int = Int(0);
+		j!to(8) {
+			k Int = Int(0);
+			k!to(8) {
+				auxC[r * 4 + 1] = 9 * i + j; // row-column constraint
+				auxC[r * 4 + 2] = (i / 3 * 3 + j / 3) * 9 + k + 81; // box-number constraint
+				auxC[r * 4 + 3] = 9 * i + k + 162; // row-number constraint
+				auxC[r * 4 + 4] = 9 * j + k + 243; // col-number constraint
+				r = r + 1;
+			}
+		}
+	}
+	nr List<Int> = List(Int(324), Int(0));
+	r = Int(0);
+	r!to(728) {
+		c2 Int = Int(0);
+		c2!to(3) {
+			k Int = auxC[r * 4 + c2 + 1];
+			auxR[k * 9 + nr[k + 1] + 1] = r;
+			nr[k + 1] = nr[k + 1] + 1;
+		}
+	}
+	return init{
+		auxR;
+		auxC;
+		sr = List(Int(729), Int(0));
+		sc = List(Int(324), Int(0));
+		cr = List(Int(81), Int(0));
+		cc = List(Int(81), Int(0));
+		out = List(Int(81), U8(0));
+		hints = Int(0);
+		i = Int(0);
+		dir = Int(1);
+		cand = Int(0);
+		solutions = List(String);
+	}
+}
+
+/// Picks choice `r`, updating the state vectors, and returns the constraint
+/// left with the fewest choices, with that count, as `min << 16 | min_c`.
+Int updateFor(this Solver, r Int) mut {
+	least Int = Int(10);
+	minC Int = Int(0);
+	c2 Int = Int(0);
+	c2!to(3) {
+		c Int = this.auxC[r * 4 + c2 + 1];
+		this.sc[c + 1] = bitOr(this.sc[c + 1], Int(128));
+	}
+	c2 = Int(0);
+	c2!to(3) { // update # available choices
+		c Int = this.auxC[r * 4 + c2 + 1];
+		r2 Int = Int(0);
+		r2!to(8) {
+			rr Int = this.auxR[c * 9 + r2 + 1];
+			forbidden Int = this.sr[rr + 1];
+			this.sr[rr + 1] = forbidden + 1; // update the row status
+			if(forbidden == 0) {
+				cc2 Int = Int(0);
+				cc2!to(3) {
+					cc Int = this.auxC[rr * 4 + cc2 + 1];
+					left Int = this.sc[cc + 1] - 1; // update # allowed choices
+					this.sc[cc + 1] = left;
+					if(left < least) { // register the minimum number
+						least = left;
+						minC = cc;
+					}
+				}
+			}
+		}
+	}
+	return bitOr(shiftLeft(least, Int(16)), minC);
+}
+
+/// Reverts choice `r`.
+Unit updateRev(this Solver, r Int) mut {
+	c2 Int = Int(0);
+	c2!to(3) {
+		c Int = this.auxC[r * 4 + c2 + 1];
+		this.sc[c + 1] = bitAnd(this.sc[c + 1], Int(127));
+	}
+	c2 = Int(0);
+	c2!to(3) { // update # available choices
+		c Int = this.auxC[r * 4 + c2 + 1];
+		r2 Int = Int(0);
+		r2!to(8) {
+			rr Int = this.auxR[c * 9 + r2 + 1];
+			forbidden Int = this.sr[rr + 1] - 1;
+			this.sr[rr + 1] = forbidden; // update the row status
+			if(forbidden == 0) { // update the count array
+				p Int = rr * 4;
+				this.sc[this.auxC[p + 1] + 1] = this.sc[this.auxC[p + 1] + 1] + 1;
+				this.sc[this.auxC[p + 2] + 1] = this.sc[this.auxC[p + 2] + 1] + 1;
+				this.sc[this.auxC[p + 3] + 1] = this.sc[this.auxC[p + 3] + 1] + 1;
+				this.sc[this.auxC[p + 4] + 1] = this.sc[this.auxC[p + 4] + 1] + 1;
+			}
+		}
+	}
+	return Unit();
+}
+
+/// Chooses the top constraint for step `i`, the one with the fewest choices
+/// below `from`, and returns how many it has.
+Int chooseTop(this Solver, i Int, from Int) mut {
+	least Int = from;
+	c Int = Int(0);
+	c!to(323) {
+		if(this.sc[c + 1] < least) {
+			least = this.sc[c + 1];
+			this.cc[i + 1] = c;
+			if(least <= 1) { // this is for acceleration; slower without this line
+				return least;
+			}
+		}
+	}
+	return least;
+}
+
+/// The first of constraint `c`'s choices from `from` that is not forbidden,
+/// or 9 when there is none.
+Int firstOpen(this Solver, c Int, from Int) {
+	r2 Int = from;
+	r2!to(8) {
+		if(this.sr[this.auxR[c * 9 + r2 + 1] + 1] == 0) {
+			return r2;
+		}
+	}
+	return Int(9);
+}
+
+/// One pass of sd_solve's inner loop: a step forward, or back.
+Unit advance(this Solver) mut {
+	i Int = this.i;
+	if(this.dir == 1) {
+		least Int = shiftRight(this.cand, Int(16));
+		this.cc[i + 1] = bitAnd(this.cand, Int(65535));
+		if(least > 1) {
+			least = this!chooseTop(i, least);
+		}
+		if(least == 0 or least == 10) { // backtrack
+			this.cr[i + 1] = ~Int(1);
+			this.dir = ~Int(1);
+			i = i - 1;
+			this.i = i;
+		}
+	}
+	if(i < 0) {
+		return Unit();
+	}
+	c Int = this.cc[i + 1];
+	if(this.dir == ~1 and this.cr[i + 1] >= 0) { // revert the choice
+		chosen Int = this.auxR[c * 9 + this.cr[i + 1] + 1];
+		this!updateRev(chosen);
+	}
+	r2 Int = this:firstOpen(c, this.cr[i + 1] + 1); // search for the choice to make
+	found Bool = if(r2 < 9) { // set the choice, moving forward
+		choice Int = this.auxR[c * 9 + r2 + 1];
+		this.cand = this!updateFor(choice);
+		this.cr[i + 1] = r2;
+		this.i = i + 1;
+		this.dir = Int(1);
+	}
+	found:else() { // backtrack
+		this.cr[i + 1] = ~Int(1);
+		this.i = i - 1;
+		this.dir = ~Int(1);
+	}
+	return Unit();
+}
+
+/// Records the solution the steps so far make, and backtracks.
+Unit record(this Solver) mut {
+	j Int = Int(0);
+	j!to(this.i - 1) {
+		r Int = this.auxR[this.cc[j + 1] * 9 + this.cr[j + 1] + 1];
+		this.out[r / 9 + 1] = U8.wrap(r - r / 9 * 9 + 49);
+	}
+	this.solutions!push(String(this.out));
+	this.i = this.i - 1;
+	this.dir = ~Int(1);
+	return Unit();
+}
+
+/// Solves the Sudoku `s`, in the standard dot/number representation, and
+/// returns its solutions.
+List<String> solve(this Solver, s String) mut {
+	r Int = Int(0);
+	r!to(728) {
+		this.sr[r + 1] = Int(0); // no row is forbidden
+	}
+	c Int = Int(0);
+	c!to(323) {
+		this.sc[c + 1] = Int(9); // 9 allowed choices; no constraint has been used
+	}
+	this.hints = Int(0);
+	this.solutions = List(String);
+	i Int = Int(0);
+	i!to(80) {
+		ch Int = Int(s:byteAt(i + 1));
+		if(Int(49) <= ch and ch <= 57) { // a number from 1 to 9
+			this!updateFor(i * 9 + ch - 49); // set the choice
+			this.hints = this.hints + 1; // count the number of hints
+		}
+		this.cr[i + 1] = ~Int(1);
+		this.cc[i + 1] = ~Int(1);
+		this.out[i + 1] = U8.wrap(ch);
+	}
+	this.dir = Int(1);
+	this.cand = shiftLeft(Int(10), Int(16));
+	this.i = Int(0);
+	this!work(Bool(this Solver) mut {
+		if(this.i < 0) {
+			return Bool(false);
+		}
+		searching Bool = if(this.i < 81 - this.hints) { // maximum 81-hints steps
+			this!advance();
+		}
+		searching:else() {
+			this!record();
+		}
+		return Bool(true);
+	});
+	return this.solutions;
+}
+
+List<String> hard20() {
+	p List<String> = List(String);
+	p!push("..............3.85..1.2.......5.7.....4...1...9.......5......73..2.1........4...9");
+	p!push(".......12........3..23..4....18....5.6..7.8.......9.....85.....9...4.5..47...6...");
+	p!push(".2..5.7..4..1....68....3...2....8..3.4..2.5.....6...1...2.9.....9......57.4...9..");
+	p!push("........3..1..56...9..4..7......9.5.7.......8.5.4.2....8..2..9...35..1..6........");
+	p!push("12.3....435....1....4........54..2..6...7.........8.9...31..5.......9.7.....6...8");
+	p!push("1.......2.9.4...5...6...7...5.9.3.......7.......85..4.7.....6...3...9.8...2.....1");
+	p!push(".......39.....1..5..3.5.8....8.9...6.7...2...1..4.......9.8..5..2....6..4..7.....");
+	p!push("12.3.....4.....3....3.5......42..5......8...9.6...5.7...15..2......9..6......7..8");
+	p!push("..3..6.8....1..2......7...4..9..8.6..3..4...1.7.2.....3....5.....5...6..98.....5.");
+	p!push("1.......9..67...2..8....4......75.3...5..2....6.3......9....8..6...4...1..25...6.");
+	p!push("..9...4...7.3...2.8...6...71..8....6....1..7.....56...3....5..1.4.....9...2...7..");
+	p!push("....9..5..1.....3...23..7....45...7.8.....2.......64...9..1.....8..6......54....7");
+	p!push("4...3.......6..8..........1....5..9..8....6...7.2........1.27..5.3....4.9........");
+	p!push("7.8...3.....2.1...5.........4.....263...8.......1...9..9.6....4....7.5...........");
+	p!push("3.7.4...........918........4.....7.....16.......25..........38..9....5...2.6.....");
+	p!push("........8..3...4...9..2..6.....79.......612...6.5.2.7...8...5...1.....2.4.5.....3");
+	p!push(".......1.4.........2...........5.4.7..8...3....1.9....3..4..2...5.1........8.6...");
+	p!push(".......12....35......6...7.7.....3.....4..8..1...........12.....8.....4..5....6..");
+	p!push("1.......2.9.4...5...6...7...5.3.4.......6........58.4...2...6...3...9.8.7.......1");
+	p!push(".....1.2.3...4.5.....6....7..2.....1.8..9..3.4.....8..5....2....9..3.4....67.....");
+	return p;
+}
+
+Unit main() {
+	console Console(@program$console);
+	runtime Runtime(@program$runtime);
+	args List<String> = runtime:arguments();
+	n Int = Int(200);
+	if(args:size() > 0) {
+		n = args[Int(1)]:parseInt() ?? Int(200);
+	}
+	puzzles List<String> = hard20();
+	solver Solver = Solver();
+	i Int = Int(1);
+	i!to(n) {
+		j Int = Int(1);
+		j!to(puzzles:size()) {
+			solutions List<String> = solver!solve(puzzles[j]);
+			k Int = Int(1);
+			k!to(solutions:size()) {
+				console!print(solutions[k]);
+			}
+			console!print("");
+		}
+	}
+	return Unit();
+}

@@ -1,0 +1,420 @@
+package bedcov;
+
+import core$;
+import math$;
+
+// A port of plb2's bedcov.c: the overlaps between two arrays of intervals,
+// found with an implicit interval tree (read the C version's comments for how
+// a sorted array forms one).
+//
+// Lists are counted from 1, so a C array element `a[i]` is `a[i + 1]` here.
+// Every position and count keeps its C value, counted from 0.
+
+// splitmix32
+
+// The 32-bit state and arithmetic of C's uint32_t, kept in an `Int`.
+type Rng = #struct {
+	x Int;
+}
+Rng(seed Int) => init{ x = seed; }
+
+Int mask32(v Int) => bitAnd(v, Int(4294967295));
+
+Int next(this Rng) mut {
+	this.x = mask32(this.x + 2654435769); // 0x9e3779b9
+	z Int = this.x;
+	z = mask32(bitXor(z, shiftRight(z, Int(16))) * 569420461); // 0x21f0aaad
+	z = mask32(bitXor(z, shiftRight(z, Int(15))) * 1935289751); // 0x735a2d97
+	return bitXor(z, shiftRight(z, Int(15)));
+}
+
+// IITree
+
+type Intv = struct {
+	st Int;
+	en Int;
+	max Int;
+	data Int;
+}
+Intv(st Int, en Int, data Int) => init{
+	st;
+	en;
+	max = Int(0);
+	data;
+}
+
+List<Intv> genIntv(this Rng, n Int, bitSt Int, bitLen Int) mut {
+	maskSt Int = shiftLeft(Int(1), bitSt) - 1;
+	maskLen Int = shiftLeft(Int(1), bitLen) - 1;
+	a List<Intv> = List(Intv);
+	i Int = Int(0);
+	i!to(n - 1) {
+		st Int = bitAnd(this!next(), maskSt);
+		en Int = st + bitAnd(this!next(), maskLen);
+		a!push(Intv(st, en, i));
+	}
+	return a;
+}
+
+type Bedcov = #struct {
+	n Int;
+	a1 List<Intv>; // the intervals indexed
+	a2 List<Intv>; // the queries
+	maxLevel Int;
+	// the radix sort's buckets, from `kb` to `ke`
+	kb List<Int>;
+	ke List<Int>;
+	// the overlaps of one query, the first `nb` of `b`
+	b List<Intv>;
+	nb Int;
+	// the stack of the tree traversal, `t` cells high
+	sx List<Int>; // node
+	sk List<Int>; // level
+	sw List<Int>; // 0 if the left child hasn't been processed
+	t Int;
+	qst Int;
+	qen Int;
+}
+
+Bedcov(n Int) {
+	rng Rng = Rng(Int(11));
+	a1 List<Intv> = rng!genIntv(n, Int(28), Int(14));
+	a2 List<Intv> = rng!genIntv(n, Int(28), Int(14));
+	return init{
+		n;
+		a1;
+		a2;
+		maxLevel = Int(0);
+		kb = List(Int(256), Int(0));
+		ke = List(Int(256), Int(0));
+		b = List(Intv);
+		nb = Int(0);
+		sx = List(Int(64), Int(0));
+		sk = List(Int(64), Int(0));
+		sw = List(Int(64), Int(0));
+		t = Int(0);
+		qst = Int(0);
+		qen = Int(0);
+	}
+}
+
+// Radix sort
+
+Int bucket(key Int, s Int, m Int) => bitAnd(shiftRight(key, s), m);
+
+/// Moves `a1[i]` down into the sorted run from `beg` before it.
+Unit insertOne(this Bedcov, beg Int, i Int) mut {
+	tmp Intv = this.a1[i + 1];
+	j Int = i;
+	step Int = Int(1);
+	step!to(i - beg) {
+		if(~(tmp.st < this.a1[j].st)) {
+			this.a1[j + 1] = tmp;
+			return Unit();
+		}
+		this.a1[j + 1] = this.a1[j];
+		j = j - 1;
+	}
+	this.a1[j + 1] = tmp;
+	return Unit();
+}
+
+Unit insertSort(this Bedcov, beg Int, end Int) mut {
+	i Int = beg + 1;
+	i!to(end - 1) {
+		if(this.a1[i + 1].st < this.a1[i].st) {
+			this!insertOne(beg, i);
+		}
+	}
+	return Unit();
+}
+
+/// Moves elements around the cycle that starts at bucket `k`'s next
+/// element, whose bucket is `l`, until one lands in bucket `k`.
+Unit cycle(this Bedcov, k Int, l Int, s Int, m Int, count Int) mut {
+	tmp Intv = this.a1[this.kb[k + 1] + 1];
+	to Int = l;
+	step Int = Int(1);
+	step!to(count) {
+		swap Intv = tmp;
+		at Int = this.kb[to + 1];
+		tmp = this.a1[at + 1];
+		this.a1[at + 1] = swap;
+		this.kb[to + 1] = at + 1;
+		to = bucket(tmp.st, s, m);
+		if(to == k) {
+			at = this.kb[k + 1];
+			this.a1[at + 1] = tmp;
+			this.kb[k + 1] = at + 1;
+			return Unit();
+		}
+	}
+	return Unit();
+}
+
+/// Moves every element into its bucket. Each pass places an element or
+/// moves to the next bucket, so `count + size` passes finish.
+Unit permute(this Bedcov, size Int, s Int, m Int, count Int) mut {
+	k Int = Int(0);
+	step Int = Int(0);
+	step!to(count + size) {
+		if(k == size) {
+			return Unit();
+		}
+		filling Bool = if(this.kb[k + 1] ~= this.ke[k + 1]) {
+			l Int = bucket(this.a1[this.kb[k + 1] + 1].st, s, m);
+			away Bool = if(l ~= k) {
+				this!cycle(k, l, s, m, count);
+			}
+			away:else() {
+				this.kb[k + 1] = this.kb[k + 1] + 1;
+			}
+		}
+		filling:else() {
+			k = k + 1;
+		}
+	}
+	return Unit();
+}
+
+Unit rsSort(this Bedcov, beg Int, end Int, nBits Int, s Int) mut {
+	size Int = shiftLeft(Int(1), nBits);
+	m Int = size - 1;
+	k Int = Int(1);
+	k!to(size) {
+		this.kb[k] = beg;
+		this.ke[k] = beg;
+	}
+	i Int = beg;
+	i!to(end - 1) {
+		at Int = bucket(this.a1[i + 1].st, s, m) + 1;
+		this.ke[at] = this.ke[at] + 1;
+	}
+	k = Int(2);
+	k!to(size) {
+		this.ke[k] = this.ke[k] + this.ke[k - 1] - beg;
+		this.kb[k] = this.ke[k - 1];
+	}
+	this!permute(size, s, m, end - beg);
+	this.kb[1] = beg;
+	k = Int(2);
+	k!to(size) {
+		this.kb[k] = this.ke[k - 1];
+	}
+	if(s ~= 0) {
+		next Int = Int(0);
+		if(s > nBits) {
+			next = s - nBits;
+		}
+		starts List<Int> = this.kb;
+		ends List<Int> = this.ke;
+		k = Int(1);
+		k!to(size) {
+			count Int = ends[k] - starts[k];
+			deep Bool = if(count > 64) {
+				this!rsSort(starts[k], ends[k], nBits, next);
+			}
+			deep!elif(count > 1) {
+				this!insertSort(starts[k], ends[k]);
+			}
+		}
+	}
+	return Unit();
+}
+
+Unit radixSort(this Bedcov) mut {
+	n Int = this.n;
+	small Bool = if(n <= 64) {
+		this!insertSort(Int(0), n);
+	}
+	small:else() {
+		this!rsSort(Int(0), n, Int(8), Int(56));
+	}
+	return Unit();
+}
+
+/// Sorts `a1` and records in each node the maximum end in its subtree.
+Unit index(this Bedcov) mut {
+	n Int = this.n;
+	this.maxLevel = ~Int(1);
+	if(n == 0) {
+		return Unit();
+	}
+	this!radixSort();
+	lastI Int = Int(0); // the rightmost node in the tree
+	last Int = Int(0); // the max value at node lastI
+	i Int = Int(0);
+	i!to((n - 1) / 2) { // leaves (i.e. at level 0)
+		at Int = 2 * i;
+		lastI = at;
+		this.a1[at + 1].max = this.a1[at + 1].en;
+		last = this.a1[at + 1].max;
+	}
+	levels Int = 63 - leadingZeros(n); // the largest k with 2^k <= n
+	k Int = Int(1);
+	k!to(levels) { // process internal nodes in the bottom-up order
+		x Int = shiftLeft(Int(1), k - 1);
+		i0 Int = shiftLeft(x, Int(1)) - 1; // the first node
+		step Int = shiftLeft(x, Int(2));
+		j Int = Int(0);
+		j!to((n - i0 + step - 1) / step - 1) { // traverse all nodes at level k
+			at Int = i0 + j * step;
+			el Int = this.a1[at - x + 1].max; // max value of the left child
+			er Int = last; // of the right child
+			if(at + x < n) {
+				er = this.a1[at + x + 1].max;
+			}
+			this.a1[at + 1].max = max(max(this.a1[at + 1].en, el), er); // set the max value for node i
+		}
+		// lastI now points to the parent of the original lastI
+		up Bool = if(bitAnd(shiftRight(lastI, k), Int(1)) == 1) {
+			lastI = lastI - x;
+		}
+		up:else() {
+			lastI = lastI + x;
+		}
+		if(lastI < n) { // update last accordingly
+			if(this.a1[lastI + 1].max > last) {
+				last = this.a1[lastI + 1].max;
+			}
+		}
+	}
+	this.maxLevel = levels;
+	return Unit();
+}
+
+Unit append(this Bedcov, at Int) mut {
+	found Intv = this.a1[at + 1];
+	room Bool = if(this.nb < this.b:size()) {
+		this.b[this.nb + 1] = found;
+	}
+	room:else() {
+		this.b!push(found);
+	}
+	this.nb = this.nb + 1;
+	return Unit();
+}
+
+Unit pushCell(this Bedcov, x Int, k Int, w Int) mut {
+	this.t = this.t + 1;
+	this.sx[this.t] = x;
+	this.sk[this.t] = k;
+	this.sw[this.t] = w;
+	return Unit();
+}
+
+/// Appends every node from `i0` before `i1` that overlaps the query, until
+/// one starts at or after its end.
+Unit scan(this Bedcov, i0 Int, i1 Int) mut {
+	i Int = i0;
+	i!to(i1 - 1) {
+		if(~(this.a1[i + 1].st < this.qen)) {
+			return Unit();
+		}
+		if(this.qst < this.a1[i + 1].en) { // if overlap, append to out[]
+			this!append(i);
+		}
+	}
+	return Unit();
+}
+
+/// Collects the intervals that overlap from `st` to `en`, sorted, as the
+/// first `nb` of `b`.
+Unit overlap(this Bedcov, st Int, en Int) mut {
+	this.nb = Int(0);
+	this.t = Int(0);
+	this.qst = st;
+	this.qen = en;
+	// push the root; this is a top down traversal
+	root Int = this.maxLevel;
+	this!pushCell(shiftLeft(Int(1), root) - 1, root, Int(0));
+	this!work(Bool(this Bedcov) mut { // the following guarantees that numbers in out[] are always sorted
+		x Int = this.sx[this.t];
+		k Int = this.sk[this.t];
+		w Int = this.sw[this.t];
+		this.t = this.t - 1;
+		n Int = this.n;
+		small Bool = if(k <= 3) { // we are in a small subtree; traverse every node in this subtree
+			i0 Int = shiftLeft(shiftRight(x, k), k);
+			i1 Int = i0 + shiftLeft(Int(1), k + 1) - 1;
+			if(i1 >= n) {
+				i1 = n;
+			}
+			this!scan(i0, i1);
+		}
+		small!elif(w == 0) { // if left child not processed
+			y Int = x - shiftLeft(Int(1), k - 1); // the left child of x; NB: y may be out of range (i.e. y>=n)
+			this!pushCell(x, k, Int(1)); // re-add node x, but mark the left child having been processed
+			// push the left child if y is out of range or may overlap with the query
+			outside Bool = if(y >= n) {
+				this!pushCell(y, k - 1, Int(0));
+			}
+			outside:else() {
+				if(this.a1[y + 1].max > this.qst) {
+					this!pushCell(y, k - 1, Int(0));
+				}
+			}
+		}
+		small:else() {
+			if(x < n) {
+				if(this.a1[x + 1].st < this.qen) { // need to push the right child
+					if(this.qst < this.a1[x + 1].en) { // test if x overlaps the query; if yes, append to out[]
+						this!append(x);
+					}
+					this!pushCell(x + shiftLeft(Int(1), k - 1), k - 1, Int(0)); // push the right child
+				}
+			}
+		}
+		return this.t > 0;
+	});
+	return Unit();
+}
+
+/// The total length the indexed intervals cover within each query.
+Int coverage(this Bedcov) mut {
+	total Int = Int(0);
+	n Int = this.n;
+	j Int = Int(1);
+	j!to(n) {
+		st0 Int = this.a2[j].st;
+		en0 Int = this.a2[j].en;
+		this!overlap(st0, en0);
+		if(this.nb > 0) {
+			covSt Int = max(this.b[1].st, st0);
+			covEn Int = min(this.b[1].en, en0);
+			cov Int = Int(0);
+			i Int = Int(2);
+			i!to(this.nb) {
+				st1 Int = max(this.b[i].st, st0);
+				en1 Int = min(this.b[i].en, en0);
+				apart Bool = if(st1 > covEn) {
+					cov = cov + covEn - covSt;
+					covSt = st1;
+					covEn = en1;
+				}
+				apart:else() {
+					covEn = max(covEn, en1);
+				}
+			}
+			cov = cov + covEn - covSt;
+			total = total + cov;
+		}
+	}
+	return total;
+}
+
+// main function
+
+Unit main() {
+	console Console(@program$console);
+	runtime Runtime(@program$runtime);
+	args List<String> = runtime:arguments();
+	n Int = Int(1000000);
+	if(args:size() > 0) {
+		n = args[Int(1)]:parseInt() ?? Int(1000000);
+	}
+	bedcov Bedcov = Bedcov(n);
+	bedcov!index();
+	console!print(String(bedcov!coverage()));
+	return Unit();
+}
