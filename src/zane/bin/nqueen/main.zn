@@ -1,0 +1,82 @@
+package nqueen;
+
+import core$;
+import math$;
+
+// The search state of nq_solve in plb2's C version. Row `k` (counted from 1)
+// holds the column chosen there, `a[k]` (-1 for none yet), and the columns
+// attacked from the rows above it along the left diagonal, the column and the
+// right diagonal, as bit masks `l[k]`, `c[k]` and `r[k]`.
+type Solver = #struct {
+	n Int;
+	y0 Int;
+	k Int;
+	m Int;
+	a List<Int>;
+	l List<Int>;
+	c List<Int>;
+	r List<Int>;
+}
+
+Solver(n Int) => init{
+	n;
+	y0 = shiftLeft(Int(1), n) - 1;
+	k = Int(1);
+	m = Int(0);
+	a = List(n, ~Int(1));
+	l = List(n, Int(0));
+	c = List(n, Int(0));
+	r = List(n, Int(0));
+}
+
+/// The first column from `from` that `y` leaves free, or `n` when none is.
+Int firstFree(y Int, from Int, n Int) {
+	i Int = from;
+	i!to(n - 1) {
+		if(bitAnd(y, shiftLeft(Int(1), i)) == 0) {
+			return i;
+		}
+	}
+	return n;
+}
+
+Int solve(n Int) {
+	s Solver = Solver(n);
+	s!work(Bool(this Solver) mut {
+		k Int = this.k;
+		y Int = bitAnd(bitOr(bitOr(this.l[k], this.c[k]), this.r[k]), this.y0);
+		choice Bool = if(shiftRight(bitXor(y, this.y0), this.a[k] + 1) ~= 0) {
+			i Int = firstFree(y, this.a[k] + 1, this.n);
+			deeper Bool = if(k < this.n) {
+				z Int = shiftLeft(Int(1), i);
+				this.a[k] = i;
+				this.l[k + 1] = shiftLeft(bitOr(this.l[k], z), Int(1));
+				this.c[k + 1] = bitOr(this.c[k], z);
+				this.r[k + 1] = shiftRight(bitOr(this.r[k], z), Int(1));
+				this.k = k + 1;
+			}
+			deeper:else() {
+				this.m = this.m + 1;
+				this.k = k - 1;
+			}
+		}
+		choice:else() {
+			this.a[k] = ~Int(1);
+			this.k = k - 1;
+		}
+		return Int(0) < this.k;
+	});
+	return s.m;
+}
+
+Unit main() {
+	console Console(@program$console);
+	runtime Runtime(@program$runtime);
+	args List<String> = runtime:arguments();
+	n Int = Int(15);
+	if(args:size() > 0) {
+		n = args[Int(1)]:parseInt() ?? Int(15);
+	}
+	console!print(String(solve(n)));
+	return Unit();
+}
